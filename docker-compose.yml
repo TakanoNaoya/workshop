@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: mcpserver-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mcp_user
+      POSTGRES_PASSWORD: mcp_pass
+      POSTGRES_DB: mcp_study
+      POSTGRES_INITDB_ARGS: --auth-host=md5 --auth-local=trust
+      TZ: Asia/Tokyo
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp_user -d mcp_study"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
