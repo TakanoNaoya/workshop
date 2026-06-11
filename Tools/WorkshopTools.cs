@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 
 /// <summary>
@@ -6,7 +7,7 @@ using ModelContextProtocol.Server;
 /// 在庫アラートツールを完成例として実装済み。
 /// 新しいツールはこのクラスにメソッドとして追加する。
 /// </summary>
-internal sealed class WorkshopTools(DbConnectionFactory dbFactory)
+internal sealed class WorkshopTools(DbConnectionFactory dbFactory, ILogger<WorkshopTools> logger)
 {
     private const string SqlServerProvider = "sqlserver";
     private const string PostgreSqlProvider = "postgresql";
@@ -19,7 +20,7 @@ internal sealed class WorkshopTools(DbConnectionFactory dbFactory)
     [Description("在庫数がアラートしきい値以下のアイテムを一覧で返す。引数不要ですぐ使える。")]
     public async Task<List<StockAlertItem>> GetStockAlerts()
     {
-        Console.WriteLine("[Tool] GetStockAlerts が呼ばれました");
+        logger.LogInformation("[Tool] GetStockAlerts called");
         const string sql = """
             SELECT
                 i.item_id,

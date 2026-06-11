@@ -2,9 +2,10 @@ using System.ComponentModel;
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 
-internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory)
+internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory, ILogger<DatabaseQueryTools> logger)
 {
     private static readonly TimeSpan ApprovalTtl = TimeSpan.FromMinutes(10);
     private static readonly ConcurrentDictionary<string, PendingApproval> PendingApprovals = new(StringComparer.Ordinal);
@@ -34,7 +35,7 @@ internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory)
         [Description("実行するSQL文。使用可能なコマンド: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP。")] string sql,
         [Description("プレビューする最大行数（1〜200）。デフォルト: 50。")] int maxRows = 50)
     {
-        Console.WriteLine($"[Tool] PreviewSql が呼ばれました: {sql.Split('\n')[0].Trim()}");
+        logger.LogInformation("[Tool] PreviewSql called: {SqlFirstLine}", sql.Split('\n')[0].Trim());
         PurgeExpiredApprovals();
 
         // プレビュー時点で許可された単一SQLかどうかを検証する。
@@ -100,7 +101,7 @@ internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory)
         [Description("PreviewSqlで取得した承認トークン。")] string previewId,
         [Description("返却する最大行数（1〜1000）。デフォルト: 100。")] int maxRows = 100)
     {
-        Console.WriteLine($"[Tool] ExecuteSql が呼ばれました: {sql.Split('\n')[0].Trim()}");
+        logger.LogInformation("[Tool] ExecuteSql called: {SqlFirstLine}", sql.Split('\n')[0].Trim());
         PurgeExpiredApprovals();
 
         // 先にSQLを検証し、許可されない文を実行前に遮断する。
