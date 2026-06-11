@@ -1,98 +1,111 @@
 using System.ComponentModel;
 using System.Collections.Concurrent;
-using System.Data.Common;
 using System.Text.RegularExpressions;
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using ModelContextProtocol.Server;
-using Npgsql;
 
-internal sealed class DatabaseQueryTools(IConfiguration configuration)
+internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory)
 {
-    private const string SqlServerProvider = "sqlserver";
-    private const string PostgreSqlProvider = "postgresql";
     private static readonly TimeSpan ApprovalTtl = TimeSpan.FromMinutes(10);
     private static readonly ConcurrentDictionary<string, PendingApproval> PendingApprovals = new(StringComparer.Ordinal);
 
+    private const string StatementTypeSelect = "SELECT";
+    private const string StatementTypeInsert = "INSERT";
+    private const string StatementTypeUpdate = "UPDATE";
+    private const string StatementTypeDelete = "DELETE";
+    private const string StatementTypeCreate = "CREATE";
+    private const string StatementTypeAlter = "ALTER";
+    private const string StatementTypeDrop = "DROP";
+
     private static readonly Regex DisallowedSqlPattern = new(
-        @"\b(insert|update|delete|merge|drop|alter|create|truncate|exec|execute|grant|revoke|deny)\b",
+        @"\b(merge|truncate|exec|execute|grant|revoke|deny)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex AllowedStatementPattern = new(
+        @"^(select|insert|update|delete|create|alter|drop)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     [McpServerTool]
-    [Description("Previews a SELECT query and issues an approval token required for execution.")]
+    [Description("SQL文（SELECT/INSERT/UPDATE/DELETE/CREATE/ALTER/DROP）をプレビューし、実行に必要な承認トークンを発行する。")]
     /// <summary>
-    /// 実行前にSELECTをプレビューし、承認トークンを発行する。
+    /// 実行前にSQL文をプレビューし、承認トークンを発行する。
     /// </summary>
-    public async Task<SelectPreviewResult> PreviewSelect(
-        [Description("SQL query. Must start with SELECT.")] string sql,
-        [Description("Maximum number of rows to preview (1-200). Default: 50.")] int maxRows = 50)
+    public async Task<SqlPreviewResult> PreviewSql(
+        [Description("実行するSQL文。使用可能なコマンド: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP。")] string sql,
+        [Description("プレビューする最大行数（1〜200）。デフォルト: 50。")] int maxRows = 50)
     {
+        Console.WriteLine($"[Tool] PreviewSql が呼ばれました: {sql.Split('\n')[0].Trim()}");
         PurgeExpiredApprovals();
 
-        // プレビュー時点でもSELECT専用ポリシーを適用する。
-        var normalizedSql = EnsureSelectOnly(sql);
+        // プレビュー時点で許可された単一SQLかどうかを検証する。
+        var normalizedSql = EnsureAllowedSingleStatement(sql);
+        var statementType = GetStatementType(normalizedSql);
         var effectiveMaxRows = Math.Clamp(maxRows, 1, 200);
-        var provider = GetProvider();
-        var connectionString = GetConnectionString();
-        var timeoutSeconds = GetCommandTimeoutSeconds();
-
-        await using var connection = CreateConnection(provider, connectionString);
-        await connection.OpenAsync();
-
-        await using var command = connection.CreateCommand();
-        command.CommandText = normalizedSql;
-        command.CommandTimeout = timeoutSeconds;
-
-        await using var reader = await command.ExecuteReaderAsync();
-
-        // 列名を先に確定して、行マッピング時に再利用する。
-        var columns = Enumerable.Range(0, reader.FieldCount)
-            .Select(reader.GetName)
-            .ToList();
-
+        var columns = new List<string>();
         var rows = new List<Dictionary<string, object?>>();
-        // 指定上限までをプレビューとして読み取る。
-        while (rows.Count < effectiveMaxRows && await reader.ReadAsync())
+        if (string.Equals(statementType, StatementTypeSelect, StringComparison.Ordinal))
         {
-            var row = new Dictionary<string, object?>(reader.FieldCount, StringComparer.OrdinalIgnoreCase);
-            for (var i = 0; i < reader.FieldCount; i++)
-            {
-                row[columns[i]] = reader.IsDBNull(i) ? null : NormalizeValue(reader.GetValue(i));
-            }
+            await using var connection = dbFactory.CreateConnection();
+            await connection.OpenAsync();
 
-            rows.Add(row);
+            await using var command = connection.CreateCommand();
+            command.CommandText = normalizedSql;
+            command.CommandTimeout = dbFactory.CommandTimeoutSeconds;
+
+            await using var reader = await command.ExecuteReaderAsync();
+
+            // 列名を先に確定して、行マッピング時に再利用する。
+            columns = Enumerable.Range(0, reader.FieldCount)
+                .Select(reader.GetName)
+                .ToList();
+
+            // 指定上限までをプレビューとして読み取る。
+            while (rows.Count < effectiveMaxRows && await reader.ReadAsync())
+            {
+                var row = new Dictionary<string, object?>(reader.FieldCount, StringComparer.OrdinalIgnoreCase);
+                for (var i = 0; i < reader.FieldCount; i++)
+                {
+                    row[columns[i]] = reader.IsDBNull(i) ? null : NormalizeValue(reader.GetValue(i));
+                }
+
+                rows.Add(row);
+            }
         }
 
         var previewId = Guid.NewGuid().ToString("N");
         var expiresAtUtc = DateTimeOffset.UtcNow.Add(ApprovalTtl);
-    // 実行時照合のため、正規化済みSQLと件数上限をトークンに紐づける。
-        PendingApprovals[previewId] = new PendingApproval(normalizedSql, effectiveMaxRows, expiresAtUtc);
+        // 実行時照合のため、正規化済みSQLと文種別、件数上限をトークンに紐づける。
+        PendingApprovals[previewId] = new PendingApproval(normalizedSql, statementType, effectiveMaxRows, expiresAtUtc);
 
-        return new SelectPreviewResult
+        return new SqlPreviewResult
         {
             PreviewId = previewId,
             ExpiresAtUtc = expiresAtUtc,
+            StatementType = statementType,
             Columns = columns,
             Rows = rows,
             RowCount = rows.Count,
-            IsTruncated = rows.Count == effectiveMaxRows
+            IsTruncated = string.Equals(statementType, StatementTypeSelect, StringComparison.Ordinal)
+                && rows.Count == effectiveMaxRows
         };
     }
 
     [McpServerTool]
-    [Description("Executes a SELECT query against the configured SQL Server or PostgreSQL database after approval. Requires previewId from PreviewSelect.")]
+    [Description("承認済みのSQL文（SELECT/INSERT/UPDATE/DELETE/CREATE/ALTER/DROP）をSQL ServerまたはPostgreSQLに対して実行する。PreviewSqlで取得したpreviewIdが必要。")]
     /// <summary>
-    /// 事前承認済みのSELECT文を実行し、最大件数で制限した表形式の結果を返す。
+    /// 事前承認済みのSQL文を実行し、SELECTは結果行、更新系は影響行数を返す。
     /// </summary>
-    public async Task<SelectQueryResult> ExecuteSelect(
-        [Description("SQL query. Must start with SELECT.")] string sql,
-        [Description("Approval token from PreviewSelect.")] string previewId,
-        [Description("Maximum number of rows to return (1-1000). Default: 100.")] int maxRows = 100)
+    public async Task<SqlQueryResult> ExecuteSql(
+        [Description("実行するSQL文。使用可能なコマンド: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP。")] string sql,
+        [Description("PreviewSqlで取得した承認トークン。")] string previewId,
+        [Description("返却する最大行数（1〜1000）。デフォルト: 100。")] int maxRows = 100)
     {
+        Console.WriteLine($"[Tool] ExecuteSql が呼ばれました: {sql.Split('\n')[0].Trim()}");
         PurgeExpiredApprovals();
 
         // 先にSQLを検証し、許可されない文を実行前に遮断する。
-        var normalizedSql = EnsureSelectOnly(sql);
+        var normalizedSql = EnsureAllowedSingleStatement(sql);
+        var statementType = GetStatementType(normalizedSql);
 
         if (string.IsNullOrWhiteSpace(previewId))
         {
@@ -115,124 +128,70 @@ internal sealed class DatabaseQueryTools(IConfiguration configuration)
             throw new InvalidOperationException("SQL does not match the approved preview SQL.");
         }
 
+        if (!string.Equals(pending.StatementType, statementType, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("SQL statement type does not match the approved preview SQL.");
+        }
+
         // 返却件数はサーバー側で安全な範囲に固定する。
         var effectiveMaxRows = Math.Clamp(maxRows, 1, pending.MaxRows);
-        var provider = GetProvider();
-        var connectionString = GetConnectionString();
-        var timeoutSeconds = GetCommandTimeoutSeconds();
 
-        await using var connection = CreateConnection(provider, connectionString);
+        await using var connection = dbFactory.CreateConnection();
         await connection.OpenAsync();
 
         await using var command = connection.CreateCommand();
         command.CommandText = normalizedSql;
-        command.CommandTimeout = timeoutSeconds;
+        command.CommandTimeout = dbFactory.CommandTimeoutSeconds;
 
-        await using var reader = await command.ExecuteReaderAsync();
-
-        // 列名を先に確定し、以降の行データで共通利用する。
-        var columns = Enumerable.Range(0, reader.FieldCount)
-            .Select(reader.GetName)
-            .ToList();
-
-        var rows = new List<Dictionary<string, object?>>();
-        // 指定件数に達するまで1行ずつ読み取る。
-        while (rows.Count < effectiveMaxRows && await reader.ReadAsync())
+        if (string.Equals(statementType, StatementTypeSelect, StringComparison.Ordinal))
         {
-            var row = new Dictionary<string, object?>(reader.FieldCount, StringComparer.OrdinalIgnoreCase);
-            for (var i = 0; i < reader.FieldCount; i++)
+            await using var reader = await command.ExecuteReaderAsync();
+
+            // 列名を先に確定し、以降の行データで共通利用する。
+            var columns = Enumerable.Range(0, reader.FieldCount)
+                .Select(reader.GetName)
+                .ToList();
+
+            var rows = new List<Dictionary<string, object?>>();
+            // 指定件数に達するまで1行ずつ読み取る。
+            while (rows.Count < effectiveMaxRows && await reader.ReadAsync())
             {
-                row[columns[i]] = reader.IsDBNull(i) ? null : NormalizeValue(reader.GetValue(i));
+                var row = new Dictionary<string, object?>(reader.FieldCount, StringComparer.OrdinalIgnoreCase);
+                for (var i = 0; i < reader.FieldCount; i++)
+                {
+                    row[columns[i]] = reader.IsDBNull(i) ? null : NormalizeValue(reader.GetValue(i));
+                }
+
+                rows.Add(row);
             }
 
-            rows.Add(row);
+            return new SqlQueryResult
+            {
+                StatementType = statementType,
+                Columns = columns,
+                Rows = rows,
+                RowCount = rows.Count,
+                RowsAffected = null,
+                IsTruncated = rows.Count == effectiveMaxRows
+            };
         }
 
-        return new SelectQueryResult
+        var affected = await command.ExecuteNonQueryAsync();
+        return new SqlQueryResult
         {
-            Columns = columns,
-            Rows = rows,
-            RowCount = rows.Count,
-            IsTruncated = rows.Count == effectiveMaxRows
+            StatementType = statementType,
+            Columns = [],
+            Rows = [],
+            RowCount = 0,
+            RowsAffected = affected,
+            IsTruncated = false
         };
     }
 
     /// <summary>
-    /// 環境変数または設定からDBプロバイダーを取得し、内部で使う値に正規化する。
+    /// 単一SQL文ポリシーを強制し、許可された文種別以外や複文を拒否する。
     /// </summary>
-    private string GetProvider()
-    {
-        // 優先順は環境変数 > 設定値 > 既定値。
-        var provider =
-            Environment.GetEnvironmentVariable("MCP_DB_PROVIDER")
-            ?? configuration["Database:Provider"]
-            ?? SqlServerProvider;
-
-        // エイリアス入力を吸収して利用可能な2種類に統一する。
-        var normalized = provider.Trim().ToLowerInvariant();
-        return normalized switch
-        {
-            "sqlserver" or "mssql" => SqlServerProvider,
-            "postgresql" or "postgres" or "pgsql" => PostgreSqlProvider,
-            _ => throw new InvalidOperationException(
-                "Unsupported database provider. Use one of: sqlserver, postgresql.")
-        };
-    }
-
-    /// <summary>
-    /// 環境変数または設定から接続文字列を取得し、未設定なら例外にする。
-    /// </summary>
-    private string GetConnectionString()
-    {
-        // 優先順は環境変数 > 設定値 > ConnectionStrings:Default。
-        var connectionString =
-            Environment.GetEnvironmentVariable("MCP_DB_CONNECTION_STRING")
-            ?? configuration["Database:ConnectionString"]
-            ?? configuration.GetConnectionString("Default");
-
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            throw new InvalidOperationException(
-                "Database connection string is not configured. Set MCP_DB_CONNECTION_STRING or Database:ConnectionString.");
-        }
-
-        return connectionString;
-    }
-
-    /// <summary>
-    /// コマンドタイムアウト秒数を取得し、許容範囲に丸める（環境変数を優先）。
-    /// </summary>
-    private int GetCommandTimeoutSeconds()
-    {
-        var timeoutFromEnv = Environment.GetEnvironmentVariable("MCP_DB_COMMAND_TIMEOUT_SECONDS");
-        if (int.TryParse(timeoutFromEnv, out var envTimeout))
-        {
-            // 極端な値を避けるため上限下限を固定する。
-            return Math.Clamp(envTimeout, 1, 600);
-        }
-
-        var timeoutFromConfig = configuration.GetValue<int?>("Database:CommandTimeoutSeconds");
-        return Math.Clamp(timeoutFromConfig ?? 30, 1, 600);
-    }
-
-    /// <summary>
-    /// プロバイダーに応じたDbConnectionインスタンスを生成する。
-    /// </summary>
-    private static DbConnection CreateConnection(string provider, string connectionString)
-    {
-        // ここで接続種別を切り替え、呼び出し側は共通APIで扱えるようにする。
-        return provider switch
-        {
-            SqlServerProvider => new SqlConnection(connectionString),
-            PostgreSqlProvider => new NpgsqlConnection(connectionString),
-            _ => throw new InvalidOperationException("Unsupported database provider.")
-        };
-    }
-
-    /// <summary>
-    /// 読み取り専用ポリシーを強制し、単一のSELECT文以外（更新系・DDL・複文）を拒否する。
-    /// </summary>
-    private static string EnsureSelectOnly(string sql)
+    private static string EnsureAllowedSingleStatement(string sql)
     {
         // 空文字やnullは実行対象外。
         if (string.IsNullOrWhiteSpace(sql))
@@ -247,10 +206,10 @@ internal sealed class DatabaseQueryTools(IConfiguration configuration)
             trimmed = trimmed[..^1].TrimEnd();
         }
 
-        // 文頭はSELECTのみ許可する。
-        if (!trimmed.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase))
+        // 文頭は許可されたSQL種別のみ受け付ける。
+        if (!AllowedStatementPattern.IsMatch(trimmed))
         {
-            throw new InvalidOperationException("Only SELECT statements are allowed.");
+            throw new InvalidOperationException("Only SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, and DROP statements are allowed.");
         }
 
         // 複文実行を防ぐため、文中セミコロンを拒否する。
@@ -262,10 +221,53 @@ internal sealed class DatabaseQueryTools(IConfiguration configuration)
         // 更新系・DDL・権限変更などのキーワードを拒否する。
         if (DisallowedSqlPattern.IsMatch(trimmed))
         {
-            throw new InvalidOperationException("Only SELECT statements are allowed.");
+            throw new InvalidOperationException("Statement contains blocked SQL keywords.");
         }
 
         return trimmed;
+    }
+
+    /// <summary>
+    /// SQL文の先頭キーワードから種別を判定する。
+    /// </summary>
+    private static string GetStatementType(string normalizedSql)
+    {
+        if (normalizedSql.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatementTypeSelect;
+        }
+
+        if (normalizedSql.StartsWith("INSERT", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatementTypeInsert;
+        }
+
+        if (normalizedSql.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatementTypeUpdate;
+        }
+
+        if (normalizedSql.StartsWith("DELETE", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatementTypeDelete;
+        }
+
+        if (normalizedSql.StartsWith("CREATE", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatementTypeCreate;
+        }
+
+        if (normalizedSql.StartsWith("ALTER", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatementTypeAlter;
+        }
+
+        if (normalizedSql.StartsWith("DROP", StringComparison.OrdinalIgnoreCase))
+        {
+            return StatementTypeDrop;
+        }
+
+        throw new InvalidOperationException("Unsupported SQL statement type.");
     }
 
     /// <summary>
@@ -298,14 +300,16 @@ internal sealed class DatabaseQueryTools(IConfiguration configuration)
         };
     }
 
-    private sealed record PendingApproval(string NormalizedSql, int MaxRows, DateTimeOffset ExpiresAtUtc);
+    private sealed record PendingApproval(string NormalizedSql, string StatementType, int MaxRows, DateTimeOffset ExpiresAtUtc);
 }
 
-internal sealed class SelectPreviewResult
+internal sealed class SqlPreviewResult
 {
     public required string PreviewId { get; init; }
 
     public required DateTimeOffset ExpiresAtUtc { get; init; }
+
+    public required string StatementType { get; init; }
 
     public required List<string> Columns { get; init; }
 
@@ -316,13 +320,17 @@ internal sealed class SelectPreviewResult
     public required bool IsTruncated { get; init; }
 }
 
-internal sealed class SelectQueryResult
+internal sealed class SqlQueryResult
 {
+    public required string StatementType { get; init; }
+
     public required List<string> Columns { get; init; }
 
     public required List<Dictionary<string, object?>> Rows { get; init; }
 
     public required int RowCount { get; init; }
+
+    public required int? RowsAffected { get; init; }
 
     public required bool IsTruncated { get; init; }
 }

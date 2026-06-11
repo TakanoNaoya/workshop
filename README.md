@@ -76,13 +76,15 @@ Refer to the VS Code or Visual Studio documentation for more information on conf
 
 Once configured, you can ask Copilot Chat for a random number, for example, `Give me 3 random numbers`. It should prompt you to use the `get_random_number` tool on the `MCPServer` MCP server and show you the results.
 
-## Database SELECT Tool
+## Database SQL Tool
 
-This project includes a database tool named `execute_select`.
+This project includes database tools named `preview_sql` and `execute_sql`.
 
 - It executes SQL Server or PostgreSQL queries.
-- It allows `SELECT` statements only.
-- `INSERT`, `UPDATE`, `DELETE`, DDL, `EXEC`, and multi-statement SQL are rejected.
+- Allowed statement types are `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, and `DROP`.
+- Multi-statement SQL is rejected.
+- You must call `preview_sql` first and pass the returned `previewId` to `execute_sql`.
+- `execute_sql` returns rows for `SELECT` and `RowsAffected` for non-query statements.
 
 ## 勉強会向け: PostgreSQLをDockerで立ててToolで操作する
 
@@ -128,7 +130,9 @@ dotnet run --project .
 
 ### 4. MCPツールを使って在庫を確認
 
-MCPクライアント（Copilot Chatなど）から `execute_select` を呼び出し、次のようなSQLを実行します。
+MCPクライアント（Copilot Chatなど）から、先に `preview_sql`、次に `execute_sql` を呼び出します。
+
+`SELECT` の例:
 
 在庫一覧:
 
@@ -149,6 +153,17 @@ WHERE del_flg = '0'
   AND alert_threshold IS NOT NULL
   AND quantity <= alert_threshold
 ORDER BY quantity ASC, item_id ASC
+```
+
+`UPDATE` の例:
+
+```sql
+UPDATE m_items
+SET quantity = quantity - 1,
+    update_dt = CURRENT_TIMESTAMP,
+    update_user = 'mcp_tool'
+WHERE item_id = 'I001'
+  AND del_flg = '0'
 ```
 
 ### 5. データを初期状態に戻したい場合
