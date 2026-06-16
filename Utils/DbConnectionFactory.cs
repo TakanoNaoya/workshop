@@ -7,8 +7,14 @@ using Npgsql;
 /// DB接続の生成とタイムアウト設定を一元管理するファクトリ。
 /// DatabaseQueryTools・WorkshopTools など複数ツールから共用する。
 /// </summary>
-internal sealed class DbConnectionFactory(IConfiguration configuration)
+internal sealed class DbConnectionFactory : IDbConnectionFactory
 {
+    private readonly IConfiguration _configuration;
+
+    public DbConnectionFactory(IConfiguration configuration)
+    {
+        _configuration = configuration;
+    }
     private const string SqlServerProvider  = "sqlserver";
     private const string PostgreSqlProvider = "postgresql";
 
@@ -41,7 +47,7 @@ internal sealed class DbConnectionFactory(IConfiguration configuration)
                 return Math.Clamp(envVal, 1, 600);
             }
 
-            var fromConfig = configuration.GetValue<int?>("Database:CommandTimeoutSeconds");
+            var fromConfig = _configuration.GetValue<int?>("Database:CommandTimeoutSeconds");
             return Math.Clamp(fromConfig ?? 30, 1, 600);
         }
     }
@@ -49,8 +55,8 @@ internal sealed class DbConnectionFactory(IConfiguration configuration)
     private string ResolveProvider()
     {
         var raw = Environment.GetEnvironmentVariable("MCP_DB_PROVIDER")
-               ?? configuration["Database:Provider"]
-               ?? SqlServerProvider;
+        ?? _configuration["Database:Provider"]
+        ?? SqlServerProvider;
 
         return raw.Trim().ToLowerInvariant() switch
         {
@@ -64,8 +70,8 @@ internal sealed class DbConnectionFactory(IConfiguration configuration)
     private string ResolveConnectionString()
     {
         var cs = Environment.GetEnvironmentVariable("MCP_DB_CONNECTION_STRING")
-              ?? configuration["Database:ConnectionString"]
-              ?? configuration.GetConnectionString("Default");
+        ?? _configuration["Database:ConnectionString"]
+        ?? _configuration.GetConnectionString("Default");
 
         if (string.IsNullOrWhiteSpace(cs))
         {

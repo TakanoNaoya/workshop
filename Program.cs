@@ -4,13 +4,18 @@ using Microsoft.Extensions.Logging;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-// Configure all logs to go to stderr (stdout is used for the MCP protocol messages).
+// すべてのログを標準エラーに出力する（標準出力はMCPプロトコルメッセージ用）
 builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
 
-// DB接続ファクトリを DI コンテナに登録する。
-builder.Services.AddSingleton<DbConnectionFactory>();
+// DIコンテナ登録
+// # if DEBUG
+    // DbConnectionFactoryのDI注入
+    builder.Services.AddSingleton<IDbConnectionFactory, DbConnectionFactory>();
+// # else
+    // builder.Services.AddSingleton<IDbConnectionFactory, PostgreSqlConnectionFactory>();
+// #endif
 
-// Add the MCP services: the transport to use (stdio) and the tools to register.
+// MCPサービスを追加 使用するトランスポート（stdio）とツールを設定する
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()

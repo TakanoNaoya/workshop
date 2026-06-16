@@ -5,11 +5,12 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 
-internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory, ILogger<DatabaseQueryTools> logger)
+internal sealed class DatabaseQueryTools
 {
     private static readonly TimeSpan ApprovalTtl = TimeSpan.FromMinutes(10);
     private static readonly ConcurrentDictionary<string, PendingApproval> PendingApprovals = new(StringComparer.Ordinal);
-
+    private readonly IDbConnectionFactory _dbFactory;
+    private readonly ILogger<DatabaseQueryTools> _logger;
     private const string StatementTypeSelect = "SELECT";
     private const string StatementTypeInsert = "INSERT";
     private const string StatementTypeUpdate = "UPDATE";
@@ -26,6 +27,12 @@ internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory, ILogger<
         @"^(select|insert|update|delete|create|alter|drop)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    public DatabaseQueryTools(IDbConnectionFactory dbFactory, ILogger<DatabaseQueryTools> logger)
+    {
+        _dbFactory = dbFactory;
+        _logger = logger;
+    }
+
     [McpServerTool]
     [Description("SQL文（SELECT/INSERT/UPDATE/DELETE/CREATE/ALTER/DROP）をプレビューし、実行に必要な承認トークンを発行する。")]
     /// <summary>
@@ -35,7 +42,7 @@ internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory, ILogger<
         [Description("実行するSQL文。使用可能なコマンド: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP。")] string sql,
         [Description("プレビューする最大行数（1〜200）。デフォルト: 50。")] int maxRows = 50)
     {
-        logger.LogInformation("[Tool] PreviewSql called: {SqlFirstLine}", sql.Split('\n')[0].Trim());
+        _logger.LogInformation("[Tool] PreviewSql called: {SqlFirstLine}", sql.Split('\n')[0].Trim());
         PurgeExpiredApprovals();
 
         // プレビュー時点で許可された単一SQLかどうかを検証する。
@@ -46,12 +53,12 @@ internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory, ILogger<
         var rows = new List<Dictionary<string, object?>>();
         if (string.Equals(statementType, StatementTypeSelect, StringComparison.Ordinal))
         {
-            await using var connection = dbFactory.CreateConnection();
+            await using var connection = _dbFactory.CreateConnection();
             await connection.OpenAsync();
 
             await using var command = connection.CreateCommand();
             command.CommandText = normalizedSql;
-            command.CommandTimeout = dbFactory.CommandTimeoutSeconds;
+            command.CommandTimeout = _dbFactory.CommandTimeoutSeconds;
 
             await using var reader = await command.ExecuteReaderAsync();
 
@@ -101,7 +108,7 @@ internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory, ILogger<
         [Description("PreviewSqlで取得した承認トークン。")] string previewId,
         [Description("返却する最大行数（1〜1000）。デフォルト: 100。")] int maxRows = 100)
     {
-        logger.LogInformation("[Tool] ExecuteSql called: {SqlFirstLine}", sql.Split('\n')[0].Trim());
+        _logger.LogInformation("[Tool] ExecuteSql called: {SqlFirstLine}", sql.Split('\n')[0].Trim());
         PurgeExpiredApprovals();
 
         // 先にSQLを検証し、許可されない文を実行前に遮断する。
@@ -137,12 +144,12 @@ internal sealed class DatabaseQueryTools(DbConnectionFactory dbFactory, ILogger<
         // 返却件数はサーバー側で安全な範囲に固定する。
         var effectiveMaxRows = Math.Clamp(maxRows, 1, pending.MaxRows);
 
-        await using var connection = dbFactory.CreateConnection();
+        await using var connection = _dbFactory.CreateConnection();
         await connection.OpenAsync();
 
         await using var command = connection.CreateCommand();
         command.CommandText = normalizedSql;
-        command.CommandTimeout = dbFactory.CommandTimeoutSeconds;
+        command.CommandTimeout = _dbFactory.CommandTimeoutSeconds;
 
         if (string.Equals(statementType, StatementTypeSelect, StringComparison.Ordinal))
         {

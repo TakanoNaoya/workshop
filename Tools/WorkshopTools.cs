@@ -7,20 +7,26 @@ using ModelContextProtocol.Server;
 /// 在庫アラートツールを完成例として実装済み。
 /// 新しいツールはこのクラスにメソッドとして追加する。
 /// </summary>
-internal sealed class WorkshopTools(DbConnectionFactory dbFactory, ILogger<WorkshopTools> logger)
+internal sealed class WorkshopTools
 {
-    private const string SqlServerProvider = "sqlserver";
-    private const string PostgreSqlProvider = "postgresql";
+    private readonly IDbConnectionFactory _dbFactory;
+    private readonly ILogger<WorkshopTools> _logger;
+
+    public WorkshopTools(IDbConnectionFactory dbFactory, ILogger<WorkshopTools> logger)
+    {
+        _dbFactory = dbFactory;
+        _logger = logger;
+    }
 
     // -------------------------------------------------------------------------
     // 完成例: 在庫アラートツール
     // -------------------------------------------------------------------------
 
     [McpServerTool]
-    [Description("在庫数がアラートしきい値以下のアイテムを一覧で返す。引数不要ですぐ使える。")]
+    [Description("在庫数がアラート閾値以下のアイテムを一覧で返す。")]
     public async Task<List<StockAlertItem>> GetStockAlerts()
     {
-        logger.LogInformation("[Tool] GetStockAlerts called");
+        _logger.LogInformation("[Tool] GetStockAlerts called");
         const string sql = """
             SELECT
                 i.item_id,
@@ -40,7 +46,7 @@ internal sealed class WorkshopTools(DbConnectionFactory dbFactory, ILogger<Works
 
         var results = new List<StockAlertItem>();
 
-        await using var connection = dbFactory.CreateConnection();
+        await using var connection = _dbFactory.CreateConnection();
         await connection.OpenAsync();
 
         await using var command = connection.CreateCommand();

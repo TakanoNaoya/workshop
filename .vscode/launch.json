@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch MCPServer",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "rebuild",
+      "program": "${workspaceFolder}/bin/Debug/net10.0/win-x64/MCPServer.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "console": "integratedTerminal",
+      "env": {
+        "MCP_DB_PROVIDER": "postgresql",
+        "MCP_DB_CONNECTION_STRING": "Host=localhost;Port=15432;Database=mcp_study;Username=mcp_user;Password=mcp_pass;SSL Mode=Disable",
+        "MCP_DB_COMMAND_TIMEOUT_SECONDS": "30"
+      }
+    },
+    {
+      "name": "Attach MCPServer Process",
+      "type": "coreclr",
+      "request": "attach",
+      "processId": "${command:pickProcess}"
+    }
+  ]
+}
